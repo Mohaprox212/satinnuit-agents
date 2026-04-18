@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Environment variables (SECRETS — ne jamais committer)
+.env
+.env.local
+.env.production
+
+# Images téléchargées (trop lourdes pour Git)
+images/
+
+# Fichiers temporaires de travail
+*.ps1
+*.html
+pexels_test.json
+detect-colors.js
+get-colors*.ps1
+find-*.ps1
+ae_prod.html
+ae_desktop.html
+
+# Scripts utilitaires (pas nécessaires pour Railway)
+run-variant-images.js
+upload-variant-images.js
+fix-variant-images.js
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
