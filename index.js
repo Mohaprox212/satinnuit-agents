@@ -15,6 +15,7 @@ const { runDailyReport, runHourlyCheck, getQuickStats } = require('./agents/conv
 const { runDesignQualityReport }                        = require('./agents/design-quality');
 const { runWeeklySEOReport }                            = require('./agents/seo');
 const { runDailyTrafficReport }                         = require('./agents/traffic');
+const { runDailyFinanceReport }                         = require('./agents/finance');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -45,6 +46,15 @@ app.get('/stats', async (req, res) => {
 });
 
 // ─── Endpoints de déclenchement manuel ───────────────────────────────────────
+app.post('/run/finance', async (req, res) => {
+  res.json({ started: true, message: 'Agent Finance lancé en arrière-plan' });
+  try {
+    await runDailyFinanceReport();
+  } catch (err) {
+    console.error('[RUN] Erreur Agent Finance:', err.message);
+  }
+});
+
 app.post('/run/traffic', async (req, res) => {
   res.json({ started: true, message: 'Agent Trafic & Viral lancé en arrière-plan' });
   try {
@@ -115,6 +125,17 @@ cron.schedule('0 * * * *', async () => {
   }
 }, { timezone: 'Europe/Paris' });
 
+// Agent Finance — tous les jours à 7h30 (Paris)
+cron.schedule('30 7 * * *', async () => {
+  console.log('[CRON] Démarrage agent Finance...');
+  try {
+    await runDailyFinanceReport();
+    console.log('[CRON] Rapport Finance envoyé ✓');
+  } catch (err) {
+    console.error('[CRON] Erreur agent Finance:', err.message);
+  }
+}, { timezone: 'Europe/Paris' });
+
 // Agent Trafic & Viral — tous les jours à 6h30 (Paris)
 cron.schedule('30 6 * * *', async () => {
   console.log('[CRON] Démarrage agent Trafic & Viral...');
@@ -156,7 +177,8 @@ app.listen(PORT, () => {
   console.log(`   Rapport Conversion      : 08h00 (Paris)`);
   console.log(`   Rapport Design & Qualité: 09h00 (Paris)`);
   console.log(`   Rapport SEO (hebdo)     : Lundi 07h00 (Paris)`);
-  console.log(`   Pack Trafic & Viral     : Quotidien 06h30 (Paris)\n`);
+  console.log(`   Pack Trafic & Viral     : Quotidien 06h30 (Paris)`);
+  console.log(`   Rapport Finance         : Quotidien 07h30 (Paris)\n`);
 
   // Rapport immédiat au démarrage (désactivé en production — enlever le commentaire pour tester)
   // runDailyReport().catch(console.error);
