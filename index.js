@@ -14,6 +14,7 @@ const cron    = require('node-cron');
 const { runDailyReport, runHourlyCheck, getQuickStats } = require('./agents/conversion');
 const { runDesignQualityReport }                        = require('./agents/design-quality');
 const { runWeeklySEOReport }                            = require('./agents/seo');
+const { runDailyTrafficReport }                         = require('./agents/traffic');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -44,6 +45,15 @@ app.get('/stats', async (req, res) => {
 });
 
 // ─── Endpoints de déclenchement manuel ───────────────────────────────────────
+app.post('/run/traffic', async (req, res) => {
+  res.json({ started: true, message: 'Agent Trafic & Viral lancé en arrière-plan' });
+  try {
+    await runDailyTrafficReport();
+  } catch (err) {
+    console.error('[RUN] Erreur Agent Traffic:', err.message);
+  }
+});
+
 app.post('/run/seo', async (req, res) => {
   res.json({ started: true, message: 'Agent SEO lancé en arrière-plan' });
   try {
@@ -105,6 +115,17 @@ cron.schedule('0 * * * *', async () => {
   }
 }, { timezone: 'Europe/Paris' });
 
+// Agent Trafic & Viral — tous les jours à 6h30 (Paris)
+cron.schedule('30 6 * * *', async () => {
+  console.log('[CRON] Démarrage agent Trafic & Viral...');
+  try {
+    await runDailyTrafficReport();
+    console.log('[CRON] Pack Trafic & Viral envoyé ✓');
+  } catch (err) {
+    console.error('[CRON] Erreur agent Trafic & Viral:', err.message);
+  }
+}, { timezone: 'Europe/Paris' });
+
 // Agent SEO — tous les lundis à 7h00 (Paris)
 cron.schedule('0 7 * * 1', async () => {
   console.log('[CRON] Démarrage agent SEO hebdomadaire...');
@@ -134,7 +155,8 @@ app.listen(PORT, () => {
   console.log(`   Email : ${process.env.REPORT_EMAIL  || '⚠️  REPORT_EMAIL non défini'}`);
   console.log(`   Rapport Conversion      : 08h00 (Paris)`);
   console.log(`   Rapport Design & Qualité: 09h00 (Paris)`);
-  console.log(`   Rapport SEO (hebdo)     : Lundi 07h00 (Paris)\n`);
+  console.log(`   Rapport SEO (hebdo)     : Lundi 07h00 (Paris)`);
+  console.log(`   Pack Trafic & Viral     : Quotidien 06h30 (Paris)\n`);
 
   // Rapport immédiat au démarrage (désactivé en production — enlever le commentaire pour tester)
   // runDailyReport().catch(console.error);
