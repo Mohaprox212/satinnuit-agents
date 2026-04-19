@@ -16,6 +16,8 @@ const { runDesignQualityReport }                        = require('./agents/desi
 const { runWeeklySEOReport }                            = require('./agents/seo');
 const { runDailyTrafficReport }                         = require('./agents/traffic');
 const { runDailyFinanceReport }                         = require('./agents/finance');
+const { runEmailCheck, runFollowUpEmails, runCartRecovery, sendClientActivityReport } = require('./agents/customer');
+const { sendEmail }                                     = require('./utils/mailer');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -46,6 +48,28 @@ app.get('/stats', async (req, res) => {
 });
 
 // ─── Endpoints de déclenchement manuel ───────────────────────────────────────
+// ─── Endpoint diagnostic boîte mail ──────────────────────────────────────────
+app.get('/client/status', async (req, res) => {
+  const { testConnection } = require('./utils/imap-client');
+  const result = await testConnection();
+  res.json({ imap: result, contactEmail: process.env.CONTACT_EMAIL || 'contact.satinnuit@gmail.com' });
+});
+
+app.post('/run/email-check', async (req, res) => {
+  res.json({ started: true, message: 'Vérification emails lancée' });
+  try { await runEmailCheck(sendEmail); } catch (err) { console.error('[RUN] Email check:', err.message); }
+});
+
+app.post('/run/followup', async (req, res) => {
+  res.json({ started: true, message: 'Suivis J+7 lancés' });
+  try { await runFollowUpEmails(); } catch (err) { console.error('[RUN] Follow-up:', err.message); }
+});
+
+app.post('/run/cart-recovery', async (req, res) => {
+  res.json({ started: true, message: 'Relances paniers lancées' });
+  try { await runCartRecovery(); } catch (err) { console.error('[RUN] Cart recovery:', err.message); }
+});
+
 app.post('/run/finance', async (req, res) => {
   res.json({ started: true, message: 'Agent Finance lancé en arrière-plan' });
   try {
@@ -125,6 +149,51 @@ cron.schedule('0 * * * *', async () => {
   }
 }, { timezone: 'Europe/Paris' });
 
+// Agent Client — vérification emails toutes les 30 min
+const clientStats = { emailsProcessed: 0, escalated: 0, followUpsSent: 0, cartRecoverySent: 0 };
+cron.schedule('*/30 * * * *', async () => {
+  try {
+    const r = await runEmailCheck(sendEmail);
+    clientStats.emailsProcessed += r.processed || 0;
+    clientStats.escalated       += r.escalated  || 0;
+  } catch (err) {
+    console.error('[CRON] Erreur vérification emails:', err.message);
+  }
+}, { timezone: 'Europe/Paris' });
+
+// Agent Client — suivi post-achat J+7 à 10h00
+cron.schedule('0 10 * * *', async () => {
+  console.log('[CRON] Suivi post-achat J+7...');
+  try {
+    const r = await runFollowUpEmails();
+    clientStats.followUpsSent += r.sent || 0;
+  } catch (err) {
+    console.error('[CRON] Erreur suivis J+7:', err.message);
+  }
+}, { timezone: 'Europe/Paris' });
+
+// Agent Client — relance paniers abandonnés à 11h00
+cron.schedule('0 11 * * *', async () => {
+  console.log('[CRON] Relance paniers abandonnés...');
+  try {
+    const r = await runCartRecovery();
+    clientStats.cartRecoverySent += r.sent || 0;
+  } catch (err) {
+    console.error('[CRON] Erreur relance paniers:', err.message);
+  }
+}, { timezone: 'Europe/Paris' });
+
+// Agent Client — rapport hebdo service client (lundi 8h00)
+cron.schedule('0 8 * * 1', async () => {
+  try {
+    await sendClientActivityReport(sendEmail, clientStats);
+    // Reset weekly stats
+    Object.keys(clientStats).forEach(k => clientStats[k] = 0);
+  } catch (err) {
+    console.error('[CRON] Erreur rapport client:', err.message);
+  }
+}, { timezone: 'Europe/Paris' });
+
 // Agent Finance — tous les jours à 7h30 (Paris)
 cron.schedule('30 7 * * *', async () => {
   console.log('[CRON] Démarrage agent Finance...');
@@ -178,7 +247,10 @@ app.listen(PORT, () => {
   console.log(`   Rapport Design & Qualité: 09h00 (Paris)`);
   console.log(`   Rapport SEO (hebdo)     : Lundi 07h00 (Paris)`);
   console.log(`   Pack Trafic & Viral     : Quotidien 06h30 (Paris)`);
-  console.log(`   Rapport Finance         : Quotidien 07h30 (Paris)\n`);
+  console.log(`   Rapport Finance         : Quotidien 07h30 (Paris)`);
+  console.log(`   Check emails client     : Toutes les 30 min`);
+  console.log(`   Suivi J+7               : Quotidien 10h00 (Paris)`);
+  console.log(`   Relance paniers         : Quotidien 11h00 (Paris)\n`);
 
   // Rapport immédiat au démarrage (désactivé en production — enlever le commentaire pour tester)
   // runDailyReport().catch(console.error);
