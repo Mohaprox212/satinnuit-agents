@@ -15,7 +15,7 @@ function createTransporter() {
     return null; // Email désactivé si non configuré
   }
 
-  return nodemailer.createTransporter({
+  return nodemailer.createTransport({
     host  : process.env.SMTP_HOST,
     port  : parseInt(process.env.SMTP_PORT || '587'),
     secure: parseInt(process.env.SMTP_PORT || '587') === 465,
