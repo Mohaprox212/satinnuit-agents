@@ -12,6 +12,7 @@
 const express = require('express');
 const cron    = require('node-cron');
 const { runDailyReport, runHourlyCheck, getQuickStats } = require('./agents/conversion');
+const { runDesignQualityReport }                        = require('./agents/design-quality');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -21,7 +22,7 @@ app.use(express.json());
 // ─── Health check ────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
-    service : 'SatinNuit Conversion Agent',
+    service : 'SatinNuit Agents (Conversion + Design & Qualité)',
     status  : 'running',
     version : '1.0.0',
     store   : process.env.SHOPIFY_STORE || 'non configuré',
@@ -38,6 +39,16 @@ app.get('/stats', async (req, res) => {
     res.json(stats);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Rapport Design & Qualité à la demande ───────────────────────────────────
+app.post('/run/design-quality', async (req, res) => {
+  res.json({ started: true, message: 'Agent Design & Qualité lancé en arrière-plan' });
+  try {
+    await runDesignQualityReport();
+  } catch (err) {
+    console.error('[RUN] Erreur Design & Qualité:', err.message);
   }
 });
 
@@ -84,12 +95,24 @@ cron.schedule('0 * * * *', async () => {
   }
 }, { timezone: 'Europe/Paris' });
 
+// Agent Design & Qualité — tous les jours à 9h00 (Paris)
+cron.schedule('0 9 * * *', async () => {
+  console.log('[CRON] Démarrage agent Design & Qualité...');
+  try {
+    await runDesignQualityReport();
+    console.log('[CRON] Rapport Design & Qualité envoyé ✓');
+  } catch (err) {
+    console.error('[CRON] Erreur agent Design & Qualité:', err.message);
+  }
+}, { timezone: 'Europe/Paris' });
+
 // ─── Démarrage ────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n🌙 SatinNuit Conversion Agent démarré sur le port ${PORT}`);
   console.log(`   Store : ${process.env.SHOPIFY_STORE || '⚠️  SHOPIFY_STORE non défini'}`);
   console.log(`   Email : ${process.env.REPORT_EMAIL  || '⚠️  REPORT_EMAIL non défini'}`);
-  console.log(`   Rapport quotidien : 08h00 (Paris)\n`);
+  console.log(`   Rapport Conversion      : 08h00 (Paris)`);
+  console.log(`   Rapport Design & Qualité: 09h00 (Paris)\n`);
 
   // Rapport immédiat au démarrage (désactivé en production — enlever le commentaire pour tester)
   // runDailyReport().catch(console.error);
