@@ -97,21 +97,36 @@ app.post('/diag/smtp', async (req, res) => {
     to   : process.env.REPORT_EMAIL || '',
   };
 
-  // ── Étape 0 : test TCP raw (5s max) ──────────────────────────────────────
-  const tcpResult = await new Promise(resolve => {
+  // ── Étape 0 : test TCP raw sur 465 ET 587 (5s max chacun, en parallèle) ─────
+  const tcpTest = (host, port) => new Promise(resolve => {
     const sock = new net.Socket();
-    const done = (ok, msg) => { try { sock.destroy(); } catch(_){} resolve({ ok, msg }); };
-    sock.setTimeout(5000);
-    sock.connect(cfg.port, cfg.host, () => done(true, `TCP OK ${cfg.host}:${cfg.port}`));
-    sock.on('error',   e  => done(false, `TCP error: ${e.message}`));
-    sock.on('timeout', () => done(false, `TCP timeout ${cfg.host}:${cfg.port}`));
+    let done = false;
+    const finish = (ok, msg) => {
+      if (done) return; done = true;
+      try { sock.destroy(); } catch(_){}
+      resolve({ ok, msg, port });
+    };
+    const timer = setTimeout(() => finish(false, `TCP timeout ${host}:${port} (firewall?)`), 5000);
+    sock.connect(port, host, () => { clearTimeout(timer); finish(true, `TCP OK ${host}:${port}`); });
+    sock.on('error', e  => { clearTimeout(timer); finish(false, `TCP error port ${port}: ${e.message}`); });
   });
-  if (!tcpResult.ok) {
-    return res.json({ ok: false, step: 'tcp', tcpResult, config: {
-      host: cfg.host, port: cfg.port, user: cfg.user || 'MANQUANT',
+
+  const [tcp465, tcp587] = await Promise.all([
+    tcpTest(cfg.host, 465),
+    tcpTest(cfg.host, 587),
+  ]);
+
+  // Choisir le port qui marche
+  const tcpOk = tcp465.ok ? tcp465 : tcp587.ok ? tcp587 : null;
+  if (!tcpOk) {
+    return res.json({ ok: false, step: 'tcp', tcp465, tcp587, config: {
+      host: cfg.host, user: cfg.user || 'MANQUANT',
       pass: cfg.pass ? cfg.pass.slice(0,4)+'****' : 'MANQUANT', to: cfg.to || 'MANQUANT',
-    }});
+    }, hint: 'Railway bloque les deux ports SMTP — utiliser un relais email (ex: Brevo, SendGrid)' });
   }
+
+  // Mettre à jour le port si différent de ce qui est configuré
+  cfg.port = tcpOk.port;
 
   // Résumé config (mot de passe masqué)
   const cfgSummary = {
