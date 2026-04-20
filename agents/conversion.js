@@ -11,7 +11,7 @@
  */
 
 const { getRecentOrders, getShopInfo, getProductVariants } = require('../utils/shopify');
-const { sendEmail } = require('../utils/mailer');
+const { sendEmail } = require('../utils/telegram');
 
 const PRODUCT_GID = process.env.PRODUCT_GID || 'gid://shopify/Product/15619012886911';
 

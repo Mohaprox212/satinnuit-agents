@@ -32,8 +32,8 @@ const { runEmailCheck, runFollowUpEmails, runCartRecovery, sendClientActivityRep
 const supervisor                                                                 = require('./agents/supervisor');
 
 // ─── Utils ────────────────────────────────────────────────────────────────────
-const { sendEmail }    = require('./utils/mailer');
-const { testConnection } = require('./utils/imap-client');
+const { sendEmail, sendRaw } = require('./utils/telegram');
+const { testConnection }     = require('./utils/imap-client');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -82,6 +82,30 @@ app.get('/stats', async (req, res) => {
 app.get('/client/status', async (req, res) => {
   const result = await testConnection();
   res.json({ imap: result, contactEmail: process.env.CONTACT_EMAIL || 'contact.satinnuit@gmail.com' });
+});
+
+// ── Test Telegram ─────────────────────────────────────────────────────────────
+app.post('/diag/telegram', async (req, res) => {
+  const token  = process.env.TELEGRAM_TOKEN   || '';
+  const chatId = process.env.TELEGRAM_CHAT_ID || '';
+  if (!token || !chatId) {
+    return res.json({ ok: false, error: 'TELEGRAM_TOKEN ou TELEGRAM_CHAT_ID manquant' });
+  }
+  const ok = await sendRaw(
+    `🌙 <b>SatinNuit Agents — Test Telegram</b>\n\n` +
+    `✅ Connexion confirmée !\n` +
+    `Tous les rapports agents seront envoyés ici.\n\n` +
+    `📋 Agents actifs :\n` +
+    `• Conversion (quotidien 08h00)\n` +
+    `• Finance (quotidien 07h30)\n` +
+    `• Trafic & Viral (quotidien 06h30)\n` +
+    `• SEO (lundi 07h00)\n` +
+    `• Design & Qualité (quotidien 09h00)\n` +
+    `• Superviseur (quotidien 06h00)\n\n` +
+    `🕐 ${new Date().toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })}`,
+    chatId
+  );
+  res.json({ ok, token: token.slice(0,8)+'...', chatId });
 });
 
 // ── Diagnostic SMTP — test connexion + envoi email de test ───────────────────

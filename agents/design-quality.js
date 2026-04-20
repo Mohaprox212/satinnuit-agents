@@ -13,7 +13,7 @@
 const https   = require('https');
 const { gql, getProductVariants } = require('../utils/shopify');
 const { runQAChecks }             = require('../utils/storefront');
-const { sendEmail }               = require('../utils/mailer');
+const { sendEmail }               = require('../utils/telegram');
 
 const STORE      = process.env.SHOPIFY_STORE || 'ggz3rz-cx.myshopify.com';
 const TOKEN      = process.env.SHOPIFY_TOKEN || '';

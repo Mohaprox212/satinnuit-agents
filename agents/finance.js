@@ -24,7 +24,7 @@
  */
 
 const https   = require('https');
-const { sendEmail } = require('../utils/mailer');
+const { sendEmail } = require('../utils/telegram');
 
 const STORE = process.env.SHOPIFY_STORE || 'ggz3rz-cx.myshopify.com';
 const TOKEN = process.env.SHOPIFY_TOKEN || '';

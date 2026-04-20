@@ -14,7 +14,7 @@
 
 const https = require('https');
 const http  = require('http');
-const { sendEmail } = require('../utils/mailer');
+const { sendEmail } = require('../utils/telegram');
 
 const ADMIN_EMAIL  = process.env.REPORT_EMAIL || 'mobadi21267@gmail.com';
 const STARTUP_TIME = new Date();
