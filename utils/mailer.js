@@ -4,11 +4,17 @@ const nodemailer = require('nodemailer');
 
 /**
  * Crée un transporteur SMTP.
- * Variables d'environnement :
- *   SMTP_HOST  — ex: smtp.gmail.com
- *   SMTP_PORT  — 465 (SSL, recommandé Railway) ou 587 (STARTTLS)
- *   SMTP_USER  — ton adresse Gmail
- *   SMTP_PASS  — mot de passe d'application Gmail (16 caractères, sans espaces)
+ *
+ * Recommandé sur Railway : Brevo (smtp-relay.brevo.com:587)
+ *   SMTP_HOST = smtp-relay.brevo.com
+ *   SMTP_PORT = 587
+ *   SMTP_USER = votre email Brevo
+ *   SMTP_PASS = clé SMTP Brevo (SMTP & API → Generate SMTP key)
+ *
+ * En local (hors Railway) : Gmail fonctionne aussi
+ *   SMTP_HOST = smtp.gmail.com
+ *   SMTP_PORT = 465
+ *   SMTP_PASS = App Password Gmail (16 chars)
  */
 function createTransporter() {
   if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
@@ -16,8 +22,8 @@ function createTransporter() {
   }
 
   const host   = process.env.SMTP_HOST;
-  const port   = parseInt(process.env.SMTP_PORT || '465');
-  const secure = port === 465; // SSL direct sur 465, STARTTLS sur 587
+  const port   = parseInt(process.env.SMTP_PORT || '587');
+  const secure = port === 465;
 
   return nodemailer.createTransport({
     host,
@@ -25,9 +31,8 @@ function createTransporter() {
     secure,
     auth: {
       user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS.replace(/\s+/g, ''), // supprimer espaces App Password
+      pass: process.env.SMTP_PASS.replace(/\s+/g, ''),
     },
-    // Nécessaire sur Railway (pas de DNS PTR sur les IPs cloud)
     tls: { rejectUnauthorized: false },
   });
 }
@@ -41,13 +46,13 @@ function createTransporter() {
 async function sendEmail(subject, htmlBody, to) {
   const transporter = createTransporter();
   if (!transporter) {
-    console.log('[MAIL] Email non configuré — message ignoré:', subject);
+    console.log('[MAIL] SMTP non configuré — ignoré:', subject);
     return false;
   }
 
   const recipient = to || process.env.REPORT_EMAIL || '';
   if (!recipient) {
-    console.warn('[MAIL] REPORT_EMAIL non défini — email ignoré');
+    console.warn('[MAIL] REPORT_EMAIL manquant — email ignoré');
     return false;
   }
 
@@ -61,7 +66,7 @@ async function sendEmail(subject, htmlBody, to) {
     console.log(`[MAIL] ✓ Envoyé → ${recipient} (${info.messageId})`);
     return true;
   } catch (err) {
-    console.error('[MAIL] ✗ Erreur envoi:', err.message);
+    console.error('[MAIL] ✗ Erreur:', err.message);
     return false;
   }
 }
