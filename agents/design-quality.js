@@ -187,277 +187,137 @@ async function auditPages() {
 //  • Injection via <style> dans product body_html (Horizon ne sanitize pas)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// ─── RÈGLES À NE JAMAIS UTILISER (causes conflits Horizon) ───────────────────
+// ✗  header { ... }          → cible 5+ <header> dans le layout produit
+// ✗  h1,h2,h3 { color: ... } → écrase le texte blanc dans les sections sombres
+// ✗  .card { ... }           → .card inclut les media containers (images cachées)
+// ✗  overflow:hidden large   → coupe les images produit
+// ✗  background !important   → sur containers structurels = zones noires
+// ✗  [type="submit"]         → cible les champs de recherche, quantité, etc.
+// ─────────────────────────────────────────────────────────────────────────────
+
 const LUXURY_CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Nunito+Sans:wght@300;400;500;600&display=swap');
 
 :root {
-  --sn-night  : #0d0d1a;
-  --sn-gold   : #c9a96e;
-  --sn-gold-lt: #e2c89a;
-  --sn-blush  : #f5e6e0;
-  --sn-cream  : #faf7f4;
-  --sn-plum   : #3d1f3d;
-  --sn-text   : #2a2a3a;
-  --sn-muted  : #7a7a8c;
-  --sn-radius : 2px;
-  --sn-trans  : 0.3s cubic-bezier(0.4,0,0.2,1);
+  --sn-gold  : #c9a96e;
+  --sn-night : #0d0d1a;
+  --sn-cream : #faf7f4;
+  --sn-text  : #2a2a3a;
+  --sn-muted : #7a7a8c;
+  --sn-trans : 0.3s cubic-bezier(0.4,0,0.2,1);
 }
 
-/* ── Typographie globale ── */
+/* ── 1. Polices — aucun impact layout ─────────────────────────────────────── */
 body {
   font-family: 'Nunito Sans', sans-serif !important;
-  font-weight: 400;
-  color: var(--sn-text) !important;
-  background: var(--sn-cream) !important;
   -webkit-font-smoothing: antialiased;
 }
 
-h1,h2,h3,h4,h5,h6,
+/* Titres Horizon — classes spécifiques uniquement, jamais h1/h2 bare */
+.h0, .h1, .h2, .h3, .h4, .h5,
 .product__title,
-.collection__title,
-.section-heading {
+.section__heading,
+.product-title {
   font-family: 'Cormorant Garamond', Georgia, serif !important;
-  font-weight: 500;
   letter-spacing: 0.02em;
-  color: var(--sn-night) !important;
 }
 
-h1, .product__title { font-size: clamp(1.8rem, 4vw, 2.8rem) !important; }
-h2 { font-size: clamp(1.4rem, 3vw, 2rem) !important; }
-
-/* ── Header / Navigation ── */
-.header, .site-header, header {
-  background: var(--sn-night) !important;
-  border-bottom: 1px solid rgba(201,169,110,0.2);
+/* ── 2. Navigation — ID précis, jamais le sélecteur "header" bare ─────────── */
+/* Horizon : id="header-component" class="header" data-theme-color="rgb(255 255 255)" */
+#header-component {
+  background-color: var(--sn-night) !important;
+  border-bottom: 1px solid rgba(201,169,110,0.15) !important;
 }
-
-.header__logo, .site-header__logo,
-.header a, .header__nav a {
+#header-component a,
+#header-component .header__heading {
   color: var(--sn-cream) !important;
-  font-family: 'Cormorant Garamond', serif !important;
-  letter-spacing: 0.1em;
   transition: color var(--sn-trans);
 }
-.header a:hover, .header__nav a:hover {
+#header-component a:hover {
   color: var(--sn-gold) !important;
 }
 
-/* ── Boutons ── */
-.btn, .button,
+/* ── 3. Boutons — sélecteurs Horizon précis, pas [type="submit"] broad ──── */
 .product-form__submit,
-[type="submit"],
 .cart__checkout-button,
-.add-to-cart {
-  background: var(--sn-night) !important;
-  color: var(--sn-cream) !important;
+.button--primary {
+  background-color: var(--sn-night) !important;
   border: 1px solid var(--sn-gold) !important;
+  color: var(--sn-cream) !important;
   font-family: 'Nunito Sans', sans-serif !important;
   font-weight: 600 !important;
-  letter-spacing: 0.12em !important;
-  text-transform: uppercase !important;
-  font-size: 0.78rem !important;
-  padding: 14px 32px !important;
-  border-radius: var(--sn-radius) !important;
-  transition: all var(--sn-trans) !important;
-  cursor: pointer;
+  letter-spacing: 0.1em !important;
+  transition: background-color var(--sn-trans), color var(--sn-trans),
+              box-shadow var(--sn-trans) !important;
 }
-.btn:hover, .button:hover,
 .product-form__submit:hover,
-[type="submit"]:hover,
-.cart__checkout-button:hover {
-  background: var(--sn-gold) !important;
+.cart__checkout-button:hover,
+.button--primary:hover {
+  background-color: var(--sn-gold) !important;
   color: var(--sn-night) !important;
-  transform: translateY(-1px);
-  box-shadow: 0 4px 20px rgba(201,169,110,0.3) !important;
+  box-shadow: 0 4px 16px rgba(201,169,110,0.35) !important;
 }
 
-/* ── Prix — badge promotion ── */
-.price__sale .price-item--sale,
-.product__price .price--sale {
-  color: var(--sn-night) !important;
-  font-family: 'Cormorant Garamond', serif !important;
-  font-size: 1.6rem !important;
-  font-weight: 600;
-}
-.price__compare-at,
-.price-item--regular,
+/* ── 4. Prix ─────────────────────────────────────────────────────────────── */
+.price__compare-at-item,
+.price-item--regular s,
 .compare-at-price {
-  color: var(--sn-muted) !important;
-  font-size: 0.9rem !important;
+  opacity: 0.55 !important;
   text-decoration: line-through !important;
-  opacity: 0.7;
-}
-.badge--sale, .badge--on-sale,
-.product__badge {
-  background: var(--sn-gold) !important;
-  color: var(--sn-night) !important;
-  font-family: 'Nunito Sans', sans-serif !important;
-  font-weight: 700 !important;
-  font-size: 0.7rem !important;
-  letter-spacing: 0.1em;
-  padding: 4px 10px !important;
-  border-radius: 1px !important;
 }
 
-/* ── Cards produit (collection) ── */
-.card, .product-card, .grid__item {
-  transition: transform var(--sn-trans), box-shadow var(--sn-trans);
-  border-radius: var(--sn-radius) !important;
+/* ── 5. Cards collection — transition uniquement, jamais overflow/background */
+.card-wrapper {
+  transition: transform var(--sn-trans), box-shadow var(--sn-trans) !important;
 }
-.card:hover, .product-card:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 12px 40px rgba(13,13,26,0.12) !important;
+.card-wrapper:hover {
+  transform: translateY(-3px) !important;
+  box-shadow: 0 8px 32px rgba(13,13,26,0.1) !important;
 }
-.card__media, .product-card__image-wrapper {
-  overflow: hidden;
-  border-radius: var(--sn-radius) !important;
-}
-.card__media img, .product-card__image {
-  transition: transform 0.6s cubic-bezier(0.4,0,0.2,1);
-}
-.card:hover .card__media img,
-.card:hover .product-card__image {
-  transform: scale(1.05);
+/* Zoom image au hover — cibler l'img directement sans toucher au container */
+.card-wrapper:hover .card__media img,
+.card-wrapper:hover .media img {
+  transform: scale(1.04) !important;
+  transition: transform 0.6s cubic-bezier(0.4,0,0.2,1) !important;
 }
 
-/* ── Sélecteur de couleurs / variantes ── */
-.swatch, .variant-swatch,
-.color-swatch {
-  border-radius: 50% !important;
-  border: 2px solid transparent !important;
-  transition: border-color var(--sn-trans), transform var(--sn-trans) !important;
-  cursor: pointer;
+/* ── 6. Footer ──────────────────────────────────────────────────────────── */
+.footer-section,
+.site-footer {
+  background-color: var(--sn-night) !important;
+  color: var(--sn-cream) !important;
+  border-top: 1px solid rgba(201,169,110,0.15) !important;
 }
-.swatch:hover, .swatch.is-active,
-.variant-swatch:hover, .variant-swatch.selected {
+.footer-section a, .site-footer a { color: #e2c89a !important; }
+.footer-section a:hover, .site-footer a:hover { color: var(--sn-gold) !important; }
+
+/* ── 7. Formulaires — focus doré, pas de background override ────────────── */
+.field__input:focus,
+.customer input:focus,
+.select__select:focus {
   border-color: var(--sn-gold) !important;
-  transform: scale(1.15) !important;
-}
-
-/* ── Page produit ── */
-.product__media-wrapper,
-.product-single__photos {
-  border-radius: var(--sn-radius) !important;
-  overflow: hidden;
-}
-
-.product-single__description,
-.product__description,
-.rte {
-  font-size: 0.95rem !important;
-  line-height: 1.75 !important;
-  color: var(--sn-text) !important;
-}
-.product-single__description h3,
-.product__description h3 {
-  font-size: 1.1rem !important;
-  font-weight: 600;
-  margin-top: 1.5em;
-  color: var(--sn-night) !important;
-}
-
-/* ── Breadcrumb ── */
-.breadcrumb, .breadcrumbs {
-  font-size: 0.78rem;
-  color: var(--sn-muted) !important;
-  letter-spacing: 0.05em;
-}
-
-/* ── Footer ── */
-.footer, footer {
-  background: var(--sn-night) !important;
-  color: var(--sn-cream) !important;
-  border-top: 1px solid rgba(201,169,110,0.15);
-}
-.footer a, footer a {
-  color: var(--sn-gold-lt) !important;
-  transition: color var(--sn-trans);
-}
-.footer a:hover, footer a:hover {
-  color: var(--sn-gold) !important;
-}
-.footer__heading, footer h3, footer h4 {
-  font-family: 'Cormorant Garamond', serif !important;
-  color: var(--sn-cream) !important;
-  font-size: 1rem !important;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
-/* ── Panier ── */
-.cart__item { border-bottom: 1px solid rgba(13,13,26,0.08) !important; }
-.cart__item-title { font-family: 'Cormorant Garamond', serif !important; font-size: 1.05rem !important; }
-.cart__subtotal-label,
-.cart__subtotal { font-weight: 600 !important; font-size: 1.1rem !important; }
-
-/* ── Formulaires ── */
-input, textarea, select {
-  border: 1px solid rgba(13,13,26,0.2) !important;
-  border-radius: var(--sn-radius) !important;
-  font-family: 'Nunito Sans', sans-serif !important;
-  padding: 12px 16px !important;
-  transition: border-color var(--sn-trans), box-shadow var(--sn-trans);
-}
-input:focus, textarea:focus, select:focus {
+  box-shadow: 0 0 0 2px rgba(201,169,110,0.2) !important;
   outline: none !important;
-  border-color: var(--sn-gold) !important;
-  box-shadow: 0 0 0 3px rgba(201,169,110,0.15) !important;
 }
 
-/* ── Annonce / Bandeau promo ── */
-.announcement-bar,
-.announcement__text,
-.marquee {
-  background: var(--sn-gold) !important;
-  color: var(--sn-night) !important;
-  font-family: 'Nunito Sans', sans-serif !important;
-  font-weight: 700;
-  font-size: 0.75rem;
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
+/* ── 8. Panier drawer ───────────────────────────────────────────────────── */
+.cart-drawer .cart-drawer__footer .cart__checkout-button {
+  width: 100% !important;
 }
 
-/* ── Animations d'entrée ── */
+/* ── 9. Animations légères — uniquement sur éléments texte, jamais media ── */
 @keyframes snFadeUp {
-  from { opacity:0; transform:translateY(20px); }
+  from { opacity:0; transform:translateY(16px); }
   to   { opacity:1; transform:translateY(0); }
 }
-@keyframes snFadeIn {
-  from { opacity:0; }
-  to   { opacity:1; }
-}
+.product__title { animation: snFadeUp 0.5s ease both; }
 
-.product__title,
-.collection__title,
-.page-title {
-  animation: snFadeUp 0.6s ease both;
-}
-.product__price {
-  animation: snFadeUp 0.6s 0.1s ease both;
-}
-.product-form__submit {
-  animation: snFadeUp 0.6s 0.2s ease both;
-}
-
-/* ── Mobile ── */
-@media (max-width: 768px) {
-  h1, .product__title { font-size: 1.6rem !important; }
-  h2 { font-size: 1.3rem !important; }
-  .btn, .button, .product-form__submit {
-    width: 100% !important;
-    padding: 16px 24px !important;
-    font-size: 0.85rem !important;
-  }
-}
-
-/* ── Scrollbar élégante ── */
-::-webkit-scrollbar { width:6px; height:6px; }
-::-webkit-scrollbar-track { background:var(--sn-cream); }
-::-webkit-scrollbar-thumb { background:var(--sn-gold); border-radius:3px; }
-::-webkit-scrollbar-thumb:hover { background:var(--sn-night); }
-
-/* ── Sélection texte ── */
-::selection { background:var(--sn-gold); color:var(--sn-night); }
+/* ── 10. Cosmétique universelle ─────────────────────────────────────────── */
+::selection { background-color: var(--sn-gold); color: var(--sn-night); }
+::-webkit-scrollbar { width:5px; height:5px; }
+::-webkit-scrollbar-track { background: #f5f5f5; }
+::-webkit-scrollbar-thumb { background: var(--sn-gold); border-radius:3px; }
 `;
 
 // ─── Description produit CRO + CSS luxury injectée ────────────────────────────
