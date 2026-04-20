@@ -87,13 +87,31 @@ app.get('/client/status', async (req, res) => {
 // ── Diagnostic SMTP — test connexion + envoi email de test ───────────────────
 app.post('/diag/smtp', async (req, res) => {
   const nodemailer = require('nodemailer');
+  const net        = require('net');
+
   const cfg = {
     host : process.env.SMTP_HOST || '',
-    port : parseInt(process.env.SMTP_PORT || '587'),
+    port : parseInt(process.env.SMTP_PORT || '465'),
     user : process.env.SMTP_USER || '',
-    pass : process.env.SMTP_PASS || '',
+    pass : (process.env.SMTP_PASS || '').replace(/\s+/g, ''),
     to   : process.env.REPORT_EMAIL || '',
   };
+
+  // ── Étape 0 : test TCP raw (5s max) ──────────────────────────────────────
+  const tcpResult = await new Promise(resolve => {
+    const sock = new net.Socket();
+    const done = (ok, msg) => { try { sock.destroy(); } catch(_){} resolve({ ok, msg }); };
+    sock.setTimeout(5000);
+    sock.connect(cfg.port, cfg.host, () => done(true, `TCP OK ${cfg.host}:${cfg.port}`));
+    sock.on('error',   e  => done(false, `TCP error: ${e.message}`));
+    sock.on('timeout', () => done(false, `TCP timeout ${cfg.host}:${cfg.port}`));
+  });
+  if (!tcpResult.ok) {
+    return res.json({ ok: false, step: 'tcp', tcpResult, config: {
+      host: cfg.host, port: cfg.port, user: cfg.user || 'MANQUANT',
+      pass: cfg.pass ? cfg.pass.slice(0,4)+'****' : 'MANQUANT', to: cfg.to || 'MANQUANT',
+    }});
+  }
 
   // Résumé config (mot de passe masqué)
   const cfgSummary = {
@@ -115,9 +133,12 @@ app.post('/diag/smtp', async (req, res) => {
     auth  : { user: cfg.user, pass: cfg.pass },
   });
 
-  // Étape 1 : vérifier la connexion
+  // Étape 1 : vérifier la connexion (timeout 15s)
   try {
-    await transporter.verify();
+    await Promise.race([
+      transporter.verify(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('verify() timeout 15s')), 15000)),
+    ]);
   } catch (err) {
     return res.json({ ok: false, step: 'verify', config: cfgSummary, error: err.message });
   }
