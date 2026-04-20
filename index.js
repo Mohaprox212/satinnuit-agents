@@ -84,6 +84,69 @@ app.get('/client/status', async (req, res) => {
   res.json({ imap: result, contactEmail: process.env.CONTACT_EMAIL || 'contact.satinnuit@gmail.com' });
 });
 
+// ── Diagnostic SMTP — test connexion + envoi email de test ───────────────────
+app.post('/diag/smtp', async (req, res) => {
+  const nodemailer = require('nodemailer');
+  const cfg = {
+    host : process.env.SMTP_HOST || '',
+    port : parseInt(process.env.SMTP_PORT || '587'),
+    user : process.env.SMTP_USER || '',
+    pass : process.env.SMTP_PASS || '',
+    to   : process.env.REPORT_EMAIL || '',
+  };
+
+  // Résumé config (mot de passe masqué)
+  const cfgSummary = {
+    host: cfg.host || 'MANQUANT',
+    port: cfg.port,
+    user: cfg.user || 'MANQUANT',
+    pass: cfg.pass ? cfg.pass.slice(0,4) + '****' + cfg.pass.slice(-2) : 'MANQUANT',
+    to  : cfg.to   || 'MANQUANT',
+  };
+
+  if (!cfg.host || !cfg.user || !cfg.pass) {
+    return res.json({ ok: false, step: 'config', config: cfgSummary, error: 'Variables SMTP manquantes' });
+  }
+
+  const transporter = nodemailer.createTransport({
+    host  : cfg.host,
+    port  : cfg.port,
+    secure: cfg.port === 465,
+    auth  : { user: cfg.user, pass: cfg.pass },
+  });
+
+  // Étape 1 : vérifier la connexion
+  try {
+    await transporter.verify();
+  } catch (err) {
+    return res.json({ ok: false, step: 'verify', config: cfgSummary, error: err.message });
+  }
+
+  // Étape 2 : envoyer l'email de test
+  try {
+    const info = await transporter.sendMail({
+      from   : `"SatinNuit Agents" <${cfg.user}>`,
+      to     : cfg.to,
+      subject: '✅ Test SMTP — SatinNuit Agents fonctionne',
+      html   : `
+        <div style="font-family:sans-serif;max-width:500px;margin:0 auto;padding:24px">
+          <h2 style="color:#2c2c2c">✅ Test SMTP réussi</h2>
+          <p>Cet email confirme que la plateforme <strong>SatinNuit Agents</strong> peut envoyer des emails.</p>
+          <table style="border-collapse:collapse;width:100%;margin-top:16px">
+            <tr><td style="padding:6px 12px;background:#f5f5f5;font-weight:600">Serveur SMTP</td><td style="padding:6px 12px">${cfg.host}:${cfg.port}</td></tr>
+            <tr><td style="padding:6px 12px;background:#f5f5f5;font-weight:600">Expéditeur</td><td style="padding:6px 12px">${cfg.user}</td></tr>
+            <tr><td style="padding:6px 12px;background:#f5f5f5;font-weight:600">Destinataire</td><td style="padding:6px 12px">${cfg.to}</td></tr>
+            <tr><td style="padding:6px 12px;background:#f5f5f5;font-weight:600">Heure</td><td style="padding:6px 12px">${new Date().toISOString()}</td></tr>
+          </table>
+          <p style="margin-top:24px;color:#888;font-size:12px">SatinNuit Agents Platform</p>
+        </div>`,
+    });
+    return res.json({ ok: true, step: 'sent', config: cfgSummary, messageId: info.messageId });
+  } catch (err) {
+    return res.json({ ok: false, step: 'send', config: cfgSummary, error: err.message });
+  }
+});
+
 // ── Diagnostic environnement + Shopify GraphQL ───────────────────────────────
 app.get('/diag', async (req, res) => {
   const https = require('https');
