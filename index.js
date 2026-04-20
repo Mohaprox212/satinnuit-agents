@@ -84,6 +84,79 @@ app.get('/client/status', async (req, res) => {
   res.json({ imap: result, contactEmail: process.env.CONTACT_EMAIL || 'contact.satinnuit@gmail.com' });
 });
 
+// ── Diagnostic environnement + Shopify GraphQL ───────────────────────────────
+app.get('/diag', async (req, res) => {
+  const https = require('https');
+  const STORE = process.env.SHOPIFY_STORE || 'ggz3rz-cx.myshopify.com';
+  const TOKEN = process.env.SHOPIFY_TOKEN || '';
+
+  // Variables d'env présentes ?
+  const envCheck = {
+    SHOPIFY_TOKEN  : TOKEN  ? `SET (${TOKEN.slice(0,8)}...)` : 'MANQUANT',
+    SHOPIFY_STORE  : process.env.SHOPIFY_STORE  ? `SET (${STORE})` : `DEFAULT (${STORE})`,
+    PRODUCT_GID    : process.env.PRODUCT_GID    ? 'SET' : 'DEFAULT',
+    REPORT_EMAIL   : process.env.REPORT_EMAIL   ? 'SET' : 'MANQUANT',
+    SMTP_HOST      : process.env.SMTP_HOST      ? 'SET' : 'MANQUANT',
+    SMTP_USER      : process.env.SMTP_USER      ? 'SET' : 'MANQUANT',
+    SMTP_PASS      : process.env.SMTP_PASS      ? 'SET' : 'MANQUANT',
+    CONTACT_EMAIL  : process.env.CONTACT_EMAIL  ? 'SET' : 'MANQUANT',
+    CONTACT_IMAP_PASS : process.env.CONTACT_IMAP_PASS ? 'SET' : 'MANQUANT',
+  };
+
+  // Test GraphQL Shopify direct depuis Railway
+  const gqlTest = await new Promise(resolve => {
+    const body = JSON.stringify({ query: '{ shop { name myshopifyDomain } }' });
+    const req = https.request({
+      hostname: STORE,
+      path: '/admin/api/2024-10/graphql.json',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': TOKEN,
+        'Content-Length': Buffer.byteLength(body),
+      },
+    }, res2 => {
+      let d = ''; let chunks = 0;
+      res2.on('data', c => { d += c; chunks++; });
+      res2.on('end', () => resolve({
+        status: res2.statusCode,
+        bodyLength: d.length,
+        bodyPreview: d.slice(0, 300),
+        chunks,
+      }));
+    });
+    req.on('error', e => resolve({ error: e.message }));
+    req.setTimeout(10000, () => resolve({ error: 'timeout 10s' }));
+    req.write(body);
+    req.end();
+  });
+
+  // Test GraphQL orders scope
+  const ordersTest = await new Promise(resolve => {
+    const body = JSON.stringify({ query: '{ orders(first:1) { nodes { id } } }' });
+    const req = https.request({
+      hostname: STORE,
+      path: '/admin/api/2024-10/graphql.json',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': TOKEN,
+        'Content-Length': Buffer.byteLength(body),
+      },
+    }, res2 => {
+      let d = '';
+      res2.on('data', c => d += c);
+      res2.on('end', () => resolve({ status: res2.statusCode, body: d.slice(0, 300) }));
+    });
+    req.on('error', e => resolve({ error: e.message }));
+    req.setTimeout(10000, () => resolve({ error: 'timeout 10s' }));
+    req.write(body);
+    req.end();
+  });
+
+  res.json({ env: envCheck, shopTest: gqlTest, ordersTest });
+});
+
 // ── Déclenchements manuels ───────────────────────────────────────────────────
 const MANUAL_TRIGGERS = [
   { path: '/run/conversion',    agent: 'conversion_daily',  fn: () => runDailyReport(),          label: 'Conversion'      },
