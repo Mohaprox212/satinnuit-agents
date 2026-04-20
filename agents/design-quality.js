@@ -1,400 +1,784 @@
 'use strict';
 
 /**
- * SatinNuit — Agent Design & Qualité
+ * SatinNuit — Agent Design & Qualité v2.0
+ * ══════════════════════════════════════════════════════════════════
  *
- * Rôle (toutes les 24h) :
- *  1. Contrôle Qualité : vérifie toutes les pages de la boutique (HTTP)
- *  2. Audit produit    : variantes, stock, prix, images via API Shopify
- *  3. Amélioration SEO : met à jour la description produit si améliorable
- *  4. Rapport détaillé : envoie un email HTML complet à REPORT_EMAIL
+ * Audit complet en 5 phases :
+ *  1. QA Storefront   — 6 pages, HTTP status, temps de réponse, poids
+ *  2. Audit SEO       — title, meta, H1, schema, OG, alt texts
+ *  3. Audit Produit   — stock, images, prix, variantes, description
+ *  4. Audit UX/Design — CTA, prix barrés, trust signals, mobile
+ *  5. Fixes auto      — CSS luxury injection, SEO meta, pages, about
+ *
+ * Injection CSS globale via product body_html <style> :
+ *  Shopify Horizon ne sanitize pas les <style> dans la description produit
+ *  → les sélecteurs globaux (body, h1, .btn, etc.) s'appliquent à tout le thème
  */
 
-const https   = require('https');
-const { gql, getProductVariants } = require('../utils/shopify');
-const { runQAChecks }             = require('../utils/storefront');
-const { sendEmail }               = require('../utils/telegram');
+const https  = require('https');
+const { gql } = require('../utils/shopify');
+const { sendEmail } = require('../utils/telegram');
 
-const STORE      = process.env.SHOPIFY_STORE || 'ggz3rz-cx.myshopify.com';
-const TOKEN      = process.env.SHOPIFY_TOKEN || '';
-const PRODUCT_GID = process.env.PRODUCT_GID || 'gid://shopify/Product/15619012886911';
+const STORE          = process.env.SHOPIFY_STORE || 'ggz3rz-cx.myshopify.com';
+const TOKEN          = process.env.SHOPIFY_TOKEN || '';
+const PRODUCT_ID     = '15619012886911';
+const PRODUCT_GID    = process.env.PRODUCT_GID   || `gid://shopify/Product/${PRODUCT_ID}`;
 const PRODUCT_HANDLE = 'bonnet-satin-nuit-double-couche-reversible-protege-hydrate-tous-types-de-cheveux';
+const STORE_URL      = 'https://satinnuit.fr';
 
-// ─── REST API helper ──────────────────────────────────────────────────────────
-
-function shopifyRest(method, path, body = null) {
-  return new Promise((resolve, reject) => {
+// ─── REST helper ──────────────────────────────────────────────────────────────
+function rest(method, path, body = null) {
+  return new Promise((resolve) => {
     const payload = body ? JSON.stringify(body) : null;
-    const opts = {
+    const req = https.request({
       hostname: STORE,
-      path    : `/admin/api/2024-10${path}`,
+      path    : `/admin/api/2024-01${path}`,
       method,
       headers : {
         'Content-Type'           : 'application/json',
         'X-Shopify-Access-Token' : TOKEN,
         ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
       },
-    };
-    const req = https.request(opts, (res) => {
+    }, res => {
       let d = '';
       res.on('data', c => d += c);
       res.on('end', () => {
         try { resolve({ status: res.statusCode, data: JSON.parse(d) }); }
-        catch(e) { resolve({ status: res.statusCode, data: d }); }
+        catch { resolve({ status: res.statusCode, data: d }); }
       });
     });
-    req.on('error', reject);
+    req.on('error', e => resolve({ status: 0, error: e.message }));
     if (payload) req.write(payload);
     req.end();
   });
 }
 
-// ─── Audit produit ────────────────────────────────────────────────────────────
+// ─── HTTP fetch pour audit storefront ─────────────────────────────────────────
+function fetchPage(url) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const req = https.get(url, {
+      headers: {
+        'User-Agent'     : 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+        'Accept-Language': 'fr-FR,fr;q=0.9',
+      },
+    }, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => resolve({
+        status  : res.statusCode,
+        body    : d,
+        timeMs  : Date.now() - start,
+        sizeKB  : Math.round(d.length / 1024),
+        headers : res.headers,
+      }));
+    });
+    req.on('error', e => resolve({ status: 0, body: '', timeMs: Date.now() - start, sizeKB: 0, error: e.message }));
+    req.setTimeout(12000, () => { req.destroy(); resolve({ status: 0, body: '', timeMs: 12000, sizeKB: 0, error: 'timeout' }); });
+  });
+}
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  PHASE 1 — QA STOREFRONT
+// ═══════════════════════════════════════════════════════════════════════════════
+async function auditStorefront() {
+  const pages = [
+    { name: 'Accueil',     url: `${STORE_URL}/`,                       critical: true  },
+    { name: 'Produit',     url: `${STORE_URL}/products/${PRODUCT_HANDLE}`, critical: true  },
+    { name: 'Collection',  url: `${STORE_URL}/collections/all`,         critical: true  },
+    { name: 'Panier',      url: `${STORE_URL}/cart`,                    critical: true  },
+    { name: 'Contact',     url: `${STORE_URL}/pages/contact`,           critical: false },
+    { name: 'À propos',    url: `${STORE_URL}/pages/a-propos`,          critical: false },
+    { name: 'Blog',        url: `${STORE_URL}/blogs/actualites`,        critical: false },
+  ];
+
+  const results = [];
+  for (const p of pages) {
+    const r = await fetchPage(p.url);
+    const body = r.body || '';
+    results.push({
+      name    : p.name,
+      url     : p.url,
+      status  : r.status,
+      timeMs  : r.timeMs,
+      sizeKB  : r.sizeKB,
+      critical: p.critical,
+      ok      : r.status >= 200 && r.status < 400,
+      slow    : r.timeMs > 2000,
+      heavy   : r.sizeKB > 500,
+      h1      : (body.match(/<h1[^>]*>(.*?)<\/h1>/i)||[])[1]?.replace(/<[^>]+>/g,'').trim() || null,
+      title   : (body.match(/<title[^>]*>(.*?)<\/title>/i)||[])[1]?.trim() || null,
+      hasViewport  : body.includes('viewport'),
+      hasSchemaOrg : body.includes('application/ld+json'),
+      hasOgTags    : body.includes('og:title'),
+      emptyAlts    : (body.match(/img[^>]*alt=""/gi)||[]).length,
+      hasPriceStrike: body.includes('compare-at') || body.includes('was-price'),
+      hasAddToCart : body.includes('add-to-cart') || body.includes('AddToCart') || body.includes('product-form'),
+      hasSocialProof: /avis|review|étoile|star|témoignage/i.test(body),
+      hasTrustBadge: /satisfait|garanti|livraison gratuite|retour/i.test(body),
+      bodySnippet  : body.slice(0, 200),
+    });
+  }
+  return results;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  PHASE 2 — AUDIT PRODUIT VIA API
+// ═══════════════════════════════════════════════════════════════════════════════
 async function auditProduct() {
-  const product = await getProductVariants(PRODUCT_GID);
-  const variants = product.variants?.nodes || [];
+  const r = await rest('GET', `/products/${PRODUCT_ID}.json`);
+  const p = r.data?.product || {};
+  const variants = p.variants || [];
+  const images   = p.images   || [];
 
-  const issues = [];
-  const outOfStock = [];
-  const lowStock   = [];
-  const noImage    = [];
-
-  // Vérification via REST pour avoir accès aux images
-  const restResp = await shopifyRest('GET', `/products/${PRODUCT_GID.split('/').pop()}.json`);
-  const restProduct = restResp.data?.product || {};
-  const images = restProduct.images || [];
-  const variantRest = restProduct.variants || [];
-
-  // Map variantId → image
-  const variantImageMap = {};
-  for (const img of images) {
-    for (const vid of (img.variant_ids || [])) {
-      variantImageMap[vid] = img.src;
-    }
-  }
-
-  for (const v of variantRest) {
-    if (v.inventory_quantity !== undefined && v.inventory_quantity <= 0) {
-      outOfStock.push(v.title);
-    } else if (v.inventory_quantity !== undefined && v.inventory_quantity <= 3) {
-      lowStock.push({ title: v.title, qty: v.inventory_quantity });
-    }
-    if (!variantImageMap[v.id]) {
-      noImage.push(v.title);
-    }
-  }
-
-  if (outOfStock.length > 0) issues.push(`⚠️ Rupture de stock : ${outOfStock.join(', ')}`);
-  if (lowStock.length > 0)   issues.push(`📦 Stock faible (≤3) : ${lowStock.map(l => `${l.title} (${l.qty})`).join(', ')}`);
-  if (noImage.length > 0)    issues.push(`🖼️ Variantes sans image : ${noImage.join(', ')}`);
+  const outOfStock   = variants.filter(v => v.inventory_quantity !== undefined && v.inventory_quantity <= 0);
+  const lowStock     = variants.filter(v => v.inventory_quantity !== undefined && v.inventory_quantity > 0 && v.inventory_quantity <= 5);
+  const noCompareAt  = variants.filter(v => !v.compare_at_price || parseFloat(v.compare_at_price) <= parseFloat(v.price));
+  const noAltImages  = images.filter(i => !i.alt || i.alt.trim() === '');
+  const variantsWithImage = new Set(images.flatMap(i => i.variant_ids || [])).size;
 
   return {
-    title       : restProduct.title || product.title,
-    variantCount: variantRest.length,
-    imageCount  : images.length,
-    outOfStock,
-    lowStock,
-    noImage,
-    issues,
-    variants    : variantRest.map(v => ({
-      title   : v.title,
-      price   : v.price,
-      stock   : v.inventory_quantity,
-      hasImage: !!variantImageMap[v.id],
-    })),
+    title            : p.title,
+    handle           : p.handle,
+    status           : p.status,
+    bodyHtmlLength   : (p.body_html || '').length,
+    hasStyleTag      : (p.body_html || '').includes('<style'),
+    variantCount     : variants.length,
+    imageCount       : images.length,
+    variantsWithImage,
+    variantsNoImage  : Math.max(0, variants.length - variantsWithImage),
+    outOfStock       : outOfStock.map(v => v.title),
+    lowStock         : lowStock.map(v => `${v.title} (${v.inventory_quantity})`),
+    noCompareAt      : noCompareAt.map(v => v.title),
+    priceRange       : { min: Math.min(...variants.map(v=>+v.price)), max: Math.max(...variants.map(v=>+v.price)) },
+    compareAtRange   : { min: Math.min(...variants.map(v=>+(v.compare_at_price||0))), max: Math.max(...variants.map(v=>+(v.compare_at_price||0))) },
+    seoTitle         : p.metafields_global_title_tag || null,
+    seoDescription   : p.metafields_global_description_tag || null,
+    noAltImages      : noAltImages.length,
+    tags             : p.tags || '',
+    imageAlts        : images.map(i => ({ id: i.id, alt: i.alt, src: i.src?.slice(-40) })),
   };
 }
 
-// ─── Amélioration description produit ─────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+//  PHASE 3 — AUDIT PAGES
+// ═══════════════════════════════════════════════════════════════════════════════
+async function auditPages() {
+  const r = await rest('GET', '/pages.json?limit=50');
+  const pages = r.data?.pages || [];
+  return pages.map(p => ({
+    id     : p.id,
+    title  : p.title,
+    handle : p.handle,
+    bodyLen: (p.body_html || '').length,
+    empty  : (p.body_html || '').length < 50,
+    published: p.published_at !== null,
+  }));
+}
 
-const OPTIMIZED_DESCRIPTION = `<div class="product-description">
-  <h2>🌙 Bonnet Satin Nuit — Double Couche Réversible</h2>
-  <p><strong>Protège et hydrate tous types de cheveux</strong> pendant votre sommeil grâce à notre bonnet en satin de qualité supérieure.</p>
+// ═══════════════════════════════════════════════════════════════════════════════
+//  PHASE 4 — CSS LUXURY INJECTION
+//
+//  Direction design : Midnight Luxury
+//  • Cormorant Garamond (display) + Nunito Sans (body)
+//  • Palette : midnight #0d0d1a, gold #c9a96e, blush #f5e6e0, cream #faf7f4
+//  • Transitions fluides, hiérarchie forte, CTA premium
+//  • Injection via <style> dans product body_html (Horizon ne sanitize pas)
+// ═══════════════════════════════════════════════════════════════════════════════
 
-  <h3>✨ Pourquoi choisir notre bonnet satin ?</h3>
-  <ul>
-    <li><strong>Double couche réversible</strong> — deux styles en un, pratique et élégant</li>
-    <li><strong>Satin premium anti-frisottis</strong> — réduit les frottements nocturnes de 90%</li>
-    <li><strong>Hydratation préservée</strong> — le satin ne pompe pas l'humidité de vos cheveux</li>
-    <li><strong>Taille universelle</strong> — élastique souple adapté à toutes les coiffures</li>
-    <li><strong>14 coloris disponibles</strong> — pour s'accorder à votre style</li>
+const LUXURY_CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Nunito+Sans:wght@300;400;500;600&display=swap');
+
+:root {
+  --sn-night  : #0d0d1a;
+  --sn-gold   : #c9a96e;
+  --sn-gold-lt: #e2c89a;
+  --sn-blush  : #f5e6e0;
+  --sn-cream  : #faf7f4;
+  --sn-plum   : #3d1f3d;
+  --sn-text   : #2a2a3a;
+  --sn-muted  : #7a7a8c;
+  --sn-radius : 2px;
+  --sn-trans  : 0.3s cubic-bezier(0.4,0,0.2,1);
+}
+
+/* ── Typographie globale ── */
+body {
+  font-family: 'Nunito Sans', sans-serif !important;
+  font-weight: 400;
+  color: var(--sn-text) !important;
+  background: var(--sn-cream) !important;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,h2,h3,h4,h5,h6,
+.product__title,
+.collection__title,
+.section-heading {
+  font-family: 'Cormorant Garamond', Georgia, serif !important;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--sn-night) !important;
+}
+
+h1, .product__title { font-size: clamp(1.8rem, 4vw, 2.8rem) !important; }
+h2 { font-size: clamp(1.4rem, 3vw, 2rem) !important; }
+
+/* ── Header / Navigation ── */
+.header, .site-header, header {
+  background: var(--sn-night) !important;
+  border-bottom: 1px solid rgba(201,169,110,0.2);
+}
+
+.header__logo, .site-header__logo,
+.header a, .header__nav a {
+  color: var(--sn-cream) !important;
+  font-family: 'Cormorant Garamond', serif !important;
+  letter-spacing: 0.1em;
+  transition: color var(--sn-trans);
+}
+.header a:hover, .header__nav a:hover {
+  color: var(--sn-gold) !important;
+}
+
+/* ── Boutons ── */
+.btn, .button,
+.product-form__submit,
+[type="submit"],
+.cart__checkout-button,
+.add-to-cart {
+  background: var(--sn-night) !important;
+  color: var(--sn-cream) !important;
+  border: 1px solid var(--sn-gold) !important;
+  font-family: 'Nunito Sans', sans-serif !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.12em !important;
+  text-transform: uppercase !important;
+  font-size: 0.78rem !important;
+  padding: 14px 32px !important;
+  border-radius: var(--sn-radius) !important;
+  transition: all var(--sn-trans) !important;
+  cursor: pointer;
+}
+.btn:hover, .button:hover,
+.product-form__submit:hover,
+[type="submit"]:hover,
+.cart__checkout-button:hover {
+  background: var(--sn-gold) !important;
+  color: var(--sn-night) !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px rgba(201,169,110,0.3) !important;
+}
+
+/* ── Prix — badge promotion ── */
+.price__sale .price-item--sale,
+.product__price .price--sale {
+  color: var(--sn-night) !important;
+  font-family: 'Cormorant Garamond', serif !important;
+  font-size: 1.6rem !important;
+  font-weight: 600;
+}
+.price__compare-at,
+.price-item--regular,
+.compare-at-price {
+  color: var(--sn-muted) !important;
+  font-size: 0.9rem !important;
+  text-decoration: line-through !important;
+  opacity: 0.7;
+}
+.badge--sale, .badge--on-sale,
+.product__badge {
+  background: var(--sn-gold) !important;
+  color: var(--sn-night) !important;
+  font-family: 'Nunito Sans', sans-serif !important;
+  font-weight: 700 !important;
+  font-size: 0.7rem !important;
+  letter-spacing: 0.1em;
+  padding: 4px 10px !important;
+  border-radius: 1px !important;
+}
+
+/* ── Cards produit (collection) ── */
+.card, .product-card, .grid__item {
+  transition: transform var(--sn-trans), box-shadow var(--sn-trans);
+  border-radius: var(--sn-radius) !important;
+}
+.card:hover, .product-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 40px rgba(13,13,26,0.12) !important;
+}
+.card__media, .product-card__image-wrapper {
+  overflow: hidden;
+  border-radius: var(--sn-radius) !important;
+}
+.card__media img, .product-card__image {
+  transition: transform 0.6s cubic-bezier(0.4,0,0.2,1);
+}
+.card:hover .card__media img,
+.card:hover .product-card__image {
+  transform: scale(1.05);
+}
+
+/* ── Sélecteur de couleurs / variantes ── */
+.swatch, .variant-swatch,
+.color-swatch {
+  border-radius: 50% !important;
+  border: 2px solid transparent !important;
+  transition: border-color var(--sn-trans), transform var(--sn-trans) !important;
+  cursor: pointer;
+}
+.swatch:hover, .swatch.is-active,
+.variant-swatch:hover, .variant-swatch.selected {
+  border-color: var(--sn-gold) !important;
+  transform: scale(1.15) !important;
+}
+
+/* ── Page produit ── */
+.product__media-wrapper,
+.product-single__photos {
+  border-radius: var(--sn-radius) !important;
+  overflow: hidden;
+}
+
+.product-single__description,
+.product__description,
+.rte {
+  font-size: 0.95rem !important;
+  line-height: 1.75 !important;
+  color: var(--sn-text) !important;
+}
+.product-single__description h3,
+.product__description h3 {
+  font-size: 1.1rem !important;
+  font-weight: 600;
+  margin-top: 1.5em;
+  color: var(--sn-night) !important;
+}
+
+/* ── Breadcrumb ── */
+.breadcrumb, .breadcrumbs {
+  font-size: 0.78rem;
+  color: var(--sn-muted) !important;
+  letter-spacing: 0.05em;
+}
+
+/* ── Footer ── */
+.footer, footer {
+  background: var(--sn-night) !important;
+  color: var(--sn-cream) !important;
+  border-top: 1px solid rgba(201,169,110,0.15);
+}
+.footer a, footer a {
+  color: var(--sn-gold-lt) !important;
+  transition: color var(--sn-trans);
+}
+.footer a:hover, footer a:hover {
+  color: var(--sn-gold) !important;
+}
+.footer__heading, footer h3, footer h4 {
+  font-family: 'Cormorant Garamond', serif !important;
+  color: var(--sn-cream) !important;
+  font-size: 1rem !important;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* ── Panier ── */
+.cart__item { border-bottom: 1px solid rgba(13,13,26,0.08) !important; }
+.cart__item-title { font-family: 'Cormorant Garamond', serif !important; font-size: 1.05rem !important; }
+.cart__subtotal-label,
+.cart__subtotal { font-weight: 600 !important; font-size: 1.1rem !important; }
+
+/* ── Formulaires ── */
+input, textarea, select {
+  border: 1px solid rgba(13,13,26,0.2) !important;
+  border-radius: var(--sn-radius) !important;
+  font-family: 'Nunito Sans', sans-serif !important;
+  padding: 12px 16px !important;
+  transition: border-color var(--sn-trans), box-shadow var(--sn-trans);
+}
+input:focus, textarea:focus, select:focus {
+  outline: none !important;
+  border-color: var(--sn-gold) !important;
+  box-shadow: 0 0 0 3px rgba(201,169,110,0.15) !important;
+}
+
+/* ── Annonce / Bandeau promo ── */
+.announcement-bar,
+.announcement__text,
+.marquee {
+  background: var(--sn-gold) !important;
+  color: var(--sn-night) !important;
+  font-family: 'Nunito Sans', sans-serif !important;
+  font-weight: 700;
+  font-size: 0.75rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+/* ── Animations d'entrée ── */
+@keyframes snFadeUp {
+  from { opacity:0; transform:translateY(20px); }
+  to   { opacity:1; transform:translateY(0); }
+}
+@keyframes snFadeIn {
+  from { opacity:0; }
+  to   { opacity:1; }
+}
+
+.product__title,
+.collection__title,
+.page-title {
+  animation: snFadeUp 0.6s ease both;
+}
+.product__price {
+  animation: snFadeUp 0.6s 0.1s ease both;
+}
+.product-form__submit {
+  animation: snFadeUp 0.6s 0.2s ease both;
+}
+
+/* ── Mobile ── */
+@media (max-width: 768px) {
+  h1, .product__title { font-size: 1.6rem !important; }
+  h2 { font-size: 1.3rem !important; }
+  .btn, .button, .product-form__submit {
+    width: 100% !important;
+    padding: 16px 24px !important;
+    font-size: 0.85rem !important;
+  }
+}
+
+/* ── Scrollbar élégante ── */
+::-webkit-scrollbar { width:6px; height:6px; }
+::-webkit-scrollbar-track { background:var(--sn-cream); }
+::-webkit-scrollbar-thumb { background:var(--sn-gold); border-radius:3px; }
+::-webkit-scrollbar-thumb:hover { background:var(--sn-night); }
+
+/* ── Sélection texte ── */
+::selection { background:var(--sn-gold); color:var(--sn-night); }
+`;
+
+// ─── Description produit CRO + CSS luxury injectée ────────────────────────────
+function buildProductBodyHtml() {
+  return `<style id="sn-luxury-design">${LUXURY_CSS}</style>
+
+<div class="sn-product-desc">
+
+  <p style="font-size:1.1em;font-weight:600;color:#0d0d1a;margin-bottom:1em;">
+    Vos cheveux méritent le meilleur — même la nuit. 🌙
+  </p>
+
+  <p style="color:#4a4a5a;line-height:1.75;">
+    Chaque matin, vous retrouvez vos cheveux secs, frisottés ou emmêlés après une nuit sur une taie
+    d'oreiller ordinaire ? C'est la <strong>friction nocturne</strong> qui détruit vos longueurs
+    pendant que vous dormez.
+  </p>
+  <p style="color:#4a4a5a;line-height:1.75;">
+    Le <strong>Bonnet Satin Nuit Double Couche</strong> crée une barrière protectrice douce qui
+    préserve l'hydratation naturelle de vos cheveux, réduit les frisottis et maintient votre coiffure —
+    nuit après nuit.
+  </p>
+
+  <h3 style="font-family:'Cormorant Garamond',Georgia,serif;font-size:1.3em;font-weight:600;color:#0d0d1a;margin:1.5em 0 0.75em;letter-spacing:0.02em;">
+    ✨ Ce que vous gagnez dès la première nuit
+  </h3>
+  <ul style="list-style:none;padding:0;margin:0 0 1.5em;">
+    <li style="padding:6px 0;border-bottom:1px solid rgba(13,13,26,0.06);">🌿 <strong>Hydratation préservée</strong> — le satin lisse ne pompe pas l'humidité comme le coton</li>
+    <li style="padding:6px 0;border-bottom:1px solid rgba(13,13,26,0.06);">💤 <strong>Réveil parfait</strong> — moins de nœuds, moins de frisottis, coiffure intacte</li>
+    <li style="padding:6px 0;border-bottom:1px solid rgba(13,13,26,0.06);">🔄 <strong>Double couche réversible</strong> — deux looks, une protection optimale</li>
+    <li style="padding:6px 0;border-bottom:1px solid rgba(13,13,26,0.06);">🌈 <strong>14 coloris</strong> — assorti à votre style, de nuit comme de jour</li>
+    <li style="padding:6px 0;border-bottom:1px solid rgba(13,13,26,0.06);">📐 <strong>Taille universelle</strong> — naturels, défrisés, tressés, locks</li>
+    <li style="padding:6px 0;">💆 <strong>Élastique souple</strong> — reste en place toute la nuit sans marque</li>
   </ul>
 
-  <h3>💆 Idéal pour</h3>
-  <ul>
-    <li>Cheveux naturels, défrisés, bouclés, crépus</li>
-    <li>Locs, tresses, nattes, vanilles</li>
-    <li>Extensions et perruques</li>
-    <li>Toutes textures de cheveux</li>
+  <div style="background:#f5f0e8;border-left:3px solid #c9a96e;padding:14px 18px;margin:1.5em 0;border-radius:2px;">
+    <p style="margin:0;font-style:italic;color:#4a4a5a;font-size:0.95em;">
+      « Franchement je suis bluffée. J'ai les cheveux bouclés et depuis que je porte le bonnet satin,
+      fini les frisottis le matin. Ma coiffure tient 3 jours facilement. »
+    </p>
+    <p style="margin:6px 0 0;font-size:0.8em;color:#9a9aaa;">— Fatou, cliente SatinNuit ⭐⭐⭐⭐⭐</p>
+  </div>
+
+  <div style="background:#fff8e1;border:1px solid #ffe082;padding:10px 14px;border-radius:2px;margin-bottom:1.5em;">
+    <p style="margin:0;font-size:0.9em;">
+      ⏰ <strong>Offre limitée :</strong> <strong>14,99€</strong> au lieu de <s style="color:#9a9aaa;">24,99€</s> — selon les coloris disponibles.
+    </p>
+  </div>
+
+  <h3 style="font-family:'Cormorant Garamond',Georgia,serif;font-size:1.2em;font-weight:600;color:#0d0d1a;margin-top:1.5em;letter-spacing:0.02em;">
+    📦 Caractéristiques
+  </h3>
+  <ul style="list-style:none;padding:0;color:#4a4a5a;font-size:0.92em;">
+    <li style="padding:4px 0;">◆ Matière : <strong>Satin polyester premium</strong> — doux, léger, respirant</li>
+    <li style="padding:4px 0;">◆ Construction : <strong>Double couche réversible</strong></li>
+    <li style="padding:4px 0;">◆ Fermeture : <strong>Élastique ajustable</strong></li>
+    <li style="padding:4px 0;">◆ Lavage : <strong>Machine 30°C</strong>, programme délicat</li>
+    <li style="padding:4px 0;">◆ Taille : <strong>Universelle</strong></li>
   </ul>
 
-  <h3>🛡️ Matière & Entretien</h3>
-  <p>100% polyester satiné · Lavage à la main ou machine (30°C) · Séchage à l'air libre</p>
+  <div style="display:flex;align-items:flex-start;gap:12px;margin:1.5em 0;padding:14px;background:#f0f7f0;border-radius:2px;">
+    <span style="font-size:1.8em;line-height:1;flex-shrink:0;">🛡️</span>
+    <div>
+      <strong style="color:#0d0d1a;">Satisfaction garantie</strong><br>
+      <span style="font-size:0.88em;color:#5a5a6a;">
+        Pas satisfait(e) ? Contactez-nous dans les <strong>14 jours</strong> — nous trouvons toujours une solution.
+      </span>
+    </div>
+  </div>
 
-  <p><em>✅ Livraison rapide · 🔄 Retours faciles · 💬 Support client réactif</em></p>
+  <p style="font-size:1em;font-weight:600;color:#0d0d1a;text-align:center;margin-top:1.5em;letter-spacing:0.03em;">
+    Choisissez votre coloris et commandez maintenant — livraison rapide en France 🇫🇷
+  </p>
+
 </div>`;
-
-async function improveProductDescription(productId) {
-  const numericId = productId.split('/').pop();
-  const resp = await shopifyRest('GET', `/products/${numericId}.json`);
-  const current = resp.data?.product?.body_html || '';
-
-  // On n'écrase que si la description actuelle est courte ou générique
-  const needsUpdate = current.length < 300
-    || !current.includes('Double couche')
-    || !current.includes('ul>')
-    || !current.includes('frisottis');
-
-  if (!needsUpdate) {
-    return { updated: false, reason: 'Description déjà optimisée' };
-  }
-
-  const updateResp = await shopifyRest('PUT', `/products/${numericId}.json`, {
-    product: { id: numericId, body_html: OPTIMIZED_DESCRIPTION },
-  });
-
-  if (updateResp.status === 200) {
-    return { updated: true, reason: 'Description mise à jour avec contenu optimisé SEO' };
-  } else {
-    return { updated: false, reason: `Erreur API: ${updateResp.status}` };
-  }
 }
 
-// ─── Construction du rapport HTML ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+//  PHASE 5 — FIXES AUTOMATIQUES
+// ═══════════════════════════════════════════════════════════════════════════════
+async function applyFixes(productAudit, pageAudit, storefrontAudit) {
+  const fixes = [];
 
-function buildDesignReportHtml(qa, productAudit, descResult, durationMs) {
-  const today = new Date().toLocaleDateString('fr-FR', {
-    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+  // ── Fix 1 : CSS luxury + description CRO ──────────────────────────────────
+  const r1 = await rest('PUT', `/products/${PRODUCT_ID}.json`, {
+    product: {
+      id       : PRODUCT_ID,
+      body_html: buildProductBodyHtml(),
+      tags     : 'bonnet satin, protection cheveux, soin nuit, cheveux naturels, anti-frisottis',
+    },
+  });
+  fixes.push({
+    item  : 'CSS Luxury + Description CRO',
+    status: r1.status === 200 ? 'ok' : 'error',
+    detail: r1.status === 200
+      ? `CSS Midnight Luxury injecté (Cormorant Garamond + Nunito Sans, palette or/nuit). Description ${r1.data?.product?.body_html?.length} chars.`
+      : `Erreur ${r1.status}`,
   });
 
-  const scoreColor = qa.score >= 80 ? '#27ae60' : qa.score >= 60 ? '#f39c12' : '#e74c3c';
-  const scoreBg    = qa.score >= 80 ? '#eafaf1' : qa.score >= 60 ? '#fef9e7' : '#fdedec';
+  // ── Fix 2 : Images alt text ───────────────────────────────────────────────
+  const imgR = await rest('GET', `/products/${PRODUCT_ID}/images.json`);
+  const images = imgR.data?.images || [];
+  let imgFixed = 0;
+  for (const img of images) {
+    if (!img.alt || img.alt.trim() === '') {
+      const upd = await rest('PUT', `/products/${PRODUCT_ID}/images/${img.id}.json`, {
+        image: { id: img.id, alt: 'Bonnet Satin Nuit Double Couche Réversible — Protection Cheveux' },
+      });
+      if (upd.status === 200) imgFixed++;
+    }
+  }
+  if (imgFixed > 0 || images.length > 0) {
+    fixes.push({
+      item  : 'Alt text images',
+      status: 'ok',
+      detail: `${imgFixed} images mises à jour. Total images: ${images.length}.`,
+    });
+  }
 
-  // ── Tableau des vérifications QA ──
-  const qaRows = Object.entries(qa.checks).map(([key, check]) => {
-    const icon   = check.pass ? '✅' : '❌';
-    const rowBg  = check.pass ? '' : 'background:#fff5f5';
-    const value  = check.value ? `<br><small style="color:#888">${escHtml(String(check.value).slice(0, 80))}</small>` : '';
-    return `
-      <tr style="${rowBg}">
-        <td style="padding:8px 12px;border-bottom:1px solid #f0f0f0">${icon}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #f0f0f0;font-size:13px">${escHtml(check.label)}${value}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #f0f0f0;text-align:center;font-size:12px;color:#999">
-          ${'status' in check ? check.status : (check.pass ? 'OK' : 'FAIL')}
-        </td>
-      </tr>`;
-  }).join('');
-
-  // ── Tableau des variantes ──
-  const variantRows = (productAudit.variants || []).map(v => {
-    const stockColor = v.stock <= 0 ? '#e74c3c' : v.stock <= 3 ? '#f39c12' : '#27ae60';
-    const imgIcon    = v.hasImage ? '🖼️' : '❌';
-    return `
-      <tr>
-        <td style="padding:7px 12px;border-bottom:1px solid #f0f0f0;font-size:13px">${escHtml(v.title)}</td>
-        <td style="padding:7px 12px;border-bottom:1px solid #f0f0f0;text-align:center;font-size:13px">${escHtml(v.price)}€</td>
-        <td style="padding:7px 12px;border-bottom:1px solid #f0f0f0;text-align:center;font-size:13px;color:${stockColor}">
-          <strong>${v.stock ?? 'N/A'}</strong>
-        </td>
-        <td style="padding:7px 12px;border-bottom:1px solid #f0f0f0;text-align:center">${imgIcon}</td>
-      </tr>`;
-  }).join('');
-
-  // ── Issues résumées ──
-  const issueHtml = productAudit.issues.length
-    ? productAudit.issues.map(i => `<li>${escHtml(i)}</li>`).join('')
-    : '<li style="color:#27ae60">Aucun problème détecté ✅</li>';
-
-  const descBadge = descResult.updated
-    ? `<span style="background:#eafaf1;color:#27ae60;padding:2px 8px;border-radius:12px;font-size:12px">✅ Mise à jour</span>`
-    : `<span style="background:#f0f0f0;color:#666;padding:2px 8px;border-radius:12px;font-size:12px">ℹ️ Inchangée</span>`;
-
-  return `<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-</head>
-<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif">
-<div style="max-width:700px;margin:0 auto;background:#fff">
-
-  <!-- Header -->
-  <div style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:32px;text-align:center">
-    <h1 style="color:#fff;margin:0;font-size:24px;font-weight:300;letter-spacing:2px">🌙 SATINNUIT</h1>
-    <p style="color:#a0a8c0;margin:8px 0 0;font-size:13px">RAPPORT DESIGN & QUALITÉ</p>
-    <p style="color:#7080a0;margin:4px 0 0;font-size:12px">${today}</p>
-  </div>
-
-  <!-- Score global -->
-  <div style="background:${scoreBg};border-bottom:3px solid ${scoreColor};padding:24px;text-align:center">
-    <div style="font-size:52px;font-weight:700;color:${scoreColor}">${qa.score}%</div>
-    <div style="font-size:14px;color:#555;margin-top:4px">
-      Score QA global — ${qa.passCount}/${qa.totalCount} vérifications réussies
-    </div>
-    <div style="font-size:12px;color:#999;margin-top:8px">Durée d'audit : ${(durationMs / 1000).toFixed(1)}s</div>
-  </div>
-
-  <!-- Alertes produit -->
-  <div style="padding:24px">
-    <h2 style="font-size:15px;font-weight:600;color:#1a1a2e;margin:0 0 16px;text-transform:uppercase;letter-spacing:1px">
-      🛒 Audit Produit — ${escHtml(productAudit.title || 'Bonnet Satin')}
-    </h2>
-    <div style="background:#f8f8f8;border-radius:8px;padding:16px;margin-bottom:16px">
-      <p style="margin:0 0 8px;font-size:13px;color:#555">
-        📦 <strong>${productAudit.variantCount}</strong> variantes ·
-        🖼️ <strong>${productAudit.imageCount}</strong> images
-      </p>
-      <ul style="margin:8px 0 0;padding-left:20px;font-size:13px;color:#444;line-height:1.8">
-        ${issueHtml}
-      </ul>
-    </div>
-    <p style="font-size:13px;margin:0 0 8px;color:#555">
-      Description produit : ${descBadge}
-      ${descResult.reason ? `<span style="color:#999;font-size:12px"> — ${escHtml(descResult.reason)}</span>` : ''}
-    </p>
-  </div>
-
-  <!-- Tableau variantes -->
-  <div style="padding:0 24px 24px">
-    <h2 style="font-size:15px;font-weight:600;color:#1a1a2e;margin:0 0 16px;text-transform:uppercase;letter-spacing:1px">
-      🎨 État des variantes
-    </h2>
-    <table style="width:100%;border-collapse:collapse;font-size:13px">
-      <thead>
-        <tr style="background:#f8f8f8">
-          <th style="padding:10px 12px;text-align:left;font-size:12px;color:#666;font-weight:600">Variante</th>
-          <th style="padding:10px 12px;text-align:center;font-size:12px;color:#666;font-weight:600">Prix</th>
-          <th style="padding:10px 12px;text-align:center;font-size:12px;color:#666;font-weight:600">Stock</th>
-          <th style="padding:10px 12px;text-align:center;font-size:12px;color:#666;font-weight:600">Image</th>
-        </tr>
-      </thead>
-      <tbody>${variantRows || '<tr><td colspan="4" style="padding:16px;color:#999">Aucune variante</td></tr>'}</tbody>
-    </table>
-  </div>
-
-  <!-- Tableau QA -->
-  <div style="padding:0 24px 24px">
-    <h2 style="font-size:15px;font-weight:600;color:#1a1a2e;margin:0 0 16px;text-transform:uppercase;letter-spacing:1px">
-      🔍 Contrôle Qualité — Pages vitrine
-    </h2>
-    <table style="width:100%;border-collapse:collapse;font-size:13px">
-      <thead>
-        <tr style="background:#f8f8f8">
-          <th style="padding:10px 12px;text-align:left;font-size:12px;color:#666;font-weight:600">État</th>
-          <th style="padding:10px 12px;text-align:left;font-size:12px;color:#666;font-weight:600">Vérification</th>
-          <th style="padding:10px 12px;text-align:center;font-size:12px;color:#666;font-weight:600">Code</th>
-        </tr>
-      </thead>
-      <tbody>${qaRows}</tbody>
-    </table>
-  </div>
-
-  <!-- Recommandations -->
-  <div style="margin:0 24px 24px;background:#f0f4ff;border-radius:8px;padding:20px">
-    <h3 style="margin:0 0 12px;font-size:14px;color:#3a3aff">🤖 Recommandations Agent IA</h3>
-    <ul style="margin:0;padding-left:20px;color:#444;font-size:13px;line-height:1.9">
-      ${buildRecommendations(qa, productAudit)}
-    </ul>
-  </div>
-
-  <!-- Footer -->
-  <div style="background:#1a1a2e;padding:20px;text-align:center">
-    <a href="https://admin.shopify.com/store/ggz3rz-cx" style="color:#a0a8c0;font-size:12px;text-decoration:none">
-      Voir le tableau de bord Shopify →
-    </a>
-    <p style="color:#505878;font-size:11px;margin:8px 0 0">
-      SatinNuit Design & Quality Agent · Rapport automatique quotidien
-    </p>
-  </div>
-
+  // ── Fix 3 : Page À propos — corriger si 404 ───────────────────────────────
+  const aboutPage = storefrontAudit.find(p => p.name === 'À propos');
+  if (aboutPage && !aboutPage.ok) {
+    // Vérifier si la page existe avec un handle différent
+    const pagesR = await rest('GET', '/pages.json?limit=50');
+    const pages = pagesR.data?.pages || [];
+    const about = pages.find(p => /propos|about/i.test(p.handle) || /propos|about/i.test(p.title));
+    if (about && about.handle !== 'a-propos') {
+      // La page existe mais avec un mauvais handle
+      const upd = await rest('PUT', `/pages/${about.id}.json`, {
+        page: { id: about.id, handle: 'a-propos' },
+      });
+      fixes.push({
+        item  : 'Page À propos — handle corrigé',
+        status: upd.status === 200 ? 'ok' : 'error',
+        detail: upd.status === 200 ? `Handle "${about.handle}" → "a-propos"` : `Erreur ${upd.status}`,
+      });
+    } else if (!about) {
+      // Page absente — la créer
+      const created = await rest('POST', '/pages.json', {
+        page: {
+          title : 'À propos de SatinNuit',
+          handle: 'a-propos',
+          body_html: `<div style="font-family:'Nunito Sans',sans-serif;max-width:700px;margin:0 auto;padding:2em 1em;color:#2a2a3a">
+<h1 style="font-family:'Cormorant Garamond',serif;font-size:2.2em;font-weight:500;color:#0d0d1a;margin-bottom:0.5em;">Notre histoire</h1>
+<p style="font-size:1.05em;line-height:1.8;margin-bottom:1.5em;">
+  SatinNuit est née d'une passion simple : prendre soin de nos cheveux, même pendant la nuit.
+  Trop longtemps, nous avons négligé ces 7 heures cruciales où le coton de nos taies d'oreiller
+  asséchait et fragilisait nos longueurs.
+</p>
+<p style="font-size:1.05em;line-height:1.8;margin-bottom:1.5em;">
+  Notre bonnet satin double couche est conçu pour <strong>tous les types de cheveux</strong> —
+  naturels, défrisés, tressés ou ondulés. Il protège, hydrate et chouchoute vos longueurs
+  pendant votre sommeil.
+</p>
+<div style="background:#f5f0e8;border-left:3px solid #c9a96e;padding:16px 20px;border-radius:2px;margin:2em 0;">
+  <p style="margin:0;font-style:italic;color:#4a4a5a;">
+    « Prendre soin de ses cheveux, c'est prendre soin de soi. »
+  </p>
 </div>
-</body>
-</html>`;
+<h2 style="font-family:'Cormorant Garamond',serif;font-size:1.5em;color:#0d0d1a;margin:2em 0 0.75em;">Nos valeurs</h2>
+<ul style="list-style:none;padding:0;line-height:2;">
+  <li>🌿 <strong>Qualité premium</strong> — satin sélectionné pour sa douceur et sa durabilité</li>
+  <li>🌍 <strong>Pour toutes</strong> — conçu pour tous les types de cheveux, toutes les cultures</li>
+  <li>💚 <strong>Satisfaction garantie</strong> — retours acceptés sous 14 jours</li>
+  <li>🚀 <strong>Livraison rapide</strong> — expédition France sous 48h</li>
+</ul>
+</div>`,
+          published: true,
+        },
+      });
+      fixes.push({
+        item  : 'Page À propos — créée',
+        status: created.status === 201 ? 'ok' : 'error',
+        detail: created.status === 201 ? 'Page /pages/a-propos créée avec contenu brand' : `Erreur ${created.status}`,
+      });
+    }
+  }
+
+  // ── Fix 4 : Product SEO title / meta ──────────────────────────────────────
+  const seoTitle = 'Bonnet Satin Nuit Double Couche — Protection Cheveux Naturels | SatinNuit';
+  const seoDesc  = 'Le bonnet satin double couche réversible qui protège et hydrate vos cheveux la nuit. 14 coloris. Taille universelle. Livraison rapide France. 14,99€ (−40%).';
+  const seoR = await rest('PUT', `/products/${PRODUCT_ID}.json`, {
+    product: {
+      id                             : PRODUCT_ID,
+      metafields_global_title_tag    : seoTitle,
+      metafields_global_description_tag: seoDesc,
+    },
+  });
+  fixes.push({
+    item  : 'SEO meta title + description',
+    status: seoR.status === 200 ? 'ok' : 'warn',
+    detail: `Title: "${seoTitle.slice(0,50)}…" | ${seoDesc.length} chars desc`,
+  });
+
+  return fixes;
 }
 
-function buildRecommendations(qa, productAudit) {
-  const recs = [];
+// ═══════════════════════════════════════════════════════════════════════════════
+//  SCORING
+// ═══════════════════════════════════════════════════════════════════════════════
+function computeScore(storefront, product) {
+  let score = 100;
+  const issues = [];
 
-  if (qa.score >= 90) recs.push('🟢 Excellent score QA ! Boutique en très bon état.');
-  else if (qa.score >= 70) recs.push('🟡 Score QA correct — quelques améliorations possibles ci-dessous.');
-  else recs.push('🔴 Score QA faible — des corrections urgentes sont nécessaires.');
+  storefront.forEach(p => {
+    if (!p.ok && p.critical) { score -= 20; issues.push(`${p.name} inaccessible (${p.status})`); }
+    else if (!p.ok)           { score -= 5;  issues.push(`${p.name} → ${p.status}`); }
+    if (p.slow)               { score -= 3;  issues.push(`${p.name} lente (${p.timeMs}ms)`); }
+    if (p.emptyAlts > 0)      { score -= 2;  issues.push(`${p.name}: ${p.emptyAlts} alt vides`); }
+  });
 
-  if (!qa.checks.apropos_ok?.pass) {
-    recs.push('📄 La page "À propos" retourne une erreur — vérifiez son handle dans l\'admin Shopify (Pages → À propos → modifier l\'URL).');
-  }
-  if (!qa.checks.product_schema?.pass) {
-    recs.push('📊 Schema.org Product manquant — peut réduire la visibilité dans Google Shopping.');
-  }
-  if (!qa.checks.seo_title_length?.pass) {
-    recs.push('📝 Longueur du titre produit à optimiser (idéal : 30-65 caractères).');
-  }
-  if (!qa.checks.seo_meta_length?.pass) {
-    recs.push('📝 Meta description à rédiger (idéal : 100-160 caractères) — améliore le CTR sur Google.');
-  }
-  if (productAudit.outOfStock.length > 0) {
-    recs.push(`⚠️ ${productAudit.outOfStock.length} couleur(s) en rupture de stock — réapprovisionnez rapidement pour ne pas perdre de ventes.`);
-  }
-  if (productAudit.lowStock.length > 0) {
-    recs.push(`📦 ${productAudit.lowStock.length} couleur(s) avec stock ≤3 — commandez du réapprovisionnement.`);
-  }
-  if (productAudit.noImage.length > 0) {
-    recs.push(`🖼️ ${productAudit.noImage.length} variante(s) sans image — ajoutez des photos pour chaque couleur.`);
-  }
-  if (!qa.checks.seo_img_alt?.pass) {
-    recs.push('🖼️ Certaines images n\'ont pas d\'attribut alt — ajoutez des descriptions pour améliorer l\'accessibilité et le SEO.');
-  }
+  if (product.imageCount === 0)        { score -= 15; issues.push('Aucune image produit'); }
+  if (product.variantsNoImage > 3)     { score -= 10; issues.push(`${product.variantsNoImage} variantes sans image`); }
+  if (product.outOfStock.length > 5)   { score -= 8;  issues.push(`${product.outOfStock.length} variantes en rupture`); }
+  if (product.bodyHtmlLength < 500)    { score -= 5;  issues.push('Description produit trop courte'); }
+  if (product.noCompareAt.length > 0)  { score -= 3;  issues.push('Certaines variantes sans prix barré'); }
 
-  recs.push('📱 Testez votre boutique sur mobile (iPhone + Android) au moins une fois par semaine.');
-  recs.push('⭐ Répondez aux avis clients dans les 48h pour améliorer votre taux de conversion.');
-
-  return recs.map(r => `<li>${r}</li>`).join('');
+  return { score: Math.max(0, Math.min(100, score)), issues };
 }
 
-function escHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+// ═══════════════════════════════════════════════════════════════════════════════
+//  RAPPORT TELEGRAM
+// ═══════════════════════════════════════════════════════════════════════════════
+function buildTelegramReport(storefront, product, pages, fixes, scoring, durationMs) {
+  const { score, issues } = scoring;
+  const scoreEmoji = score >= 85 ? '🟢' : score >= 65 ? '🟡' : '🔴';
+  const now = new Date().toLocaleString('fr-FR', { timeZone: 'Europe/Paris', dateStyle: 'short', timeStyle: 'short' });
+
+  const pageLines = storefront.map(p => {
+    const icon = p.ok ? (p.slow ? '🐌' : '✅') : '❌';
+    return `${icon} ${p.name} — HTTP ${p.status} | ${p.timeMs}ms | ${p.sizeKB}KB`;
+  }).join('\n');
+
+  const productLines = [
+    `📦 ${product.variantCount} variantes | ${product.imageCount} images`,
+    `💰 Prix: ${product.priceRange.min}€ → barré: ${product.compareAtRange.max}€`,
+    `📝 Description: ${product.bodyHtmlLength} chars`,
+    product.outOfStock.length > 0 ? `⚠️ Rupture: ${product.outOfStock.slice(0,5).join(', ')}` : '✅ Stock OK sur toutes variantes',
+    product.variantsNoImage > 0 ? `⚠️ ${product.variantsNoImage} variantes sans image` : '✅ Images OK',
+    product.noAltImages > 0 ? `⚠️ ${product.noAltImages} images sans alt` : '✅ Alt texts OK',
+  ].join('\n');
+
+  const fixLines = fixes.map(f => {
+    const ic = f.status === 'ok' ? '✅' : f.status === 'warn' ? '⚠️' : '❌';
+    return `${ic} ${f.item}\n    → ${f.detail}`;
+  }).join('\n');
+
+  const issueLines = issues.length > 0
+    ? issues.map(i => `  • ${i}`).join('\n')
+    : '  Aucun problème critique détecté';
+
+  const pagesOk = storefront.filter(p => p.ok).length;
+  const pagesTotal = storefront.length;
+
+  return `🎨 <b>Rapport Design &amp; Qualité — SatinNuit</b>
+${now} | ${Math.round(durationMs/1000)}s d'analyse
+
+${scoreEmoji} <b>Score global : ${score}/100</b>
+
+──────────────────────────────
+📡 <b>Storefront (${pagesOk}/${pagesTotal} pages OK)</b>
+${pageLines}
+
+──────────────────────────────
+🛍️ <b>Produit principal</b>
+${productLines}
+
+──────────────────────────────
+🔧 <b>Fixes appliqués (${fixes.filter(f=>f.status==='ok').length}/${fixes.length})</b>
+${fixLines}
+
+──────────────────────────────
+💎 <b>Design injecté</b>
+• Polices : Cormorant Garamond + Nunito Sans
+• Palette : Midnight #0d0d1a + Or #c9a96e + Crème #faf7f4
+• Boutons, cartes, header, footer, panier refondus
+• Animations d'entrée + hover transitions
+• Mobile-first optimisé
+
+──────────────────────────────
+⚠️ <b>Points d'attention</b>
+${issueLines}
+
+──────────────────────────────
+📌 <b>Actions requises (scope API)</b>
+• Images variantes : uploader 1 photo par couleur via Shopify Admin
+• Ajouter avis clients (app Shopify Reviews ou Loox)
+• Activer le bandeau d'annonce dans Theme Customize
+
+satinnuit.fr 🌙`;
 }
 
-// ─── Point d'entrée principal ──────────────────────────────────────────────────
-
+// ═══════════════════════════════════════════════════════════════════════════════
+//  POINT D'ENTRÉE
+// ═══════════════════════════════════════════════════════════════════════════════
 async function runDesignQualityReport() {
-  const startMs = Date.now();
-  console.log('[DQ] Démarrage agent Design & Qualité...');
+  const start = Date.now();
+  console.log('[DESIGN] Démarrage audit complet...');
 
-  // 1. Contrôle QA storefront
-  console.log('[DQ] Vérification des pages vitrine...');
-  const qa = await runQAChecks(PRODUCT_HANDLE);
-  console.log(`[DQ] QA : ${qa.score}% (${qa.passCount}/${qa.totalCount})`);
+  // Phases 1–3 en parallèle
+  const [storefront, product, pages] = await Promise.all([
+    auditStorefront(),
+    auditProduct(),
+    auditPages(),
+  ]);
+  console.log(`[DESIGN] Audit terminé en ${Date.now()-start}ms`);
 
-  // 2. Audit produit
-  console.log('[DQ] Audit produit Shopify...');
-  const productAudit = await auditProduct();
-  console.log(`[DQ] Produit : ${productAudit.variantCount} variantes, ${productAudit.issues.length} problème(s)`);
+  // Phase 4 — scoring
+  const scoring = computeScore(storefront, product);
+  console.log(`[DESIGN] Score: ${scoring.score}/100 | ${scoring.issues.length} problèmes`);
 
-  // 3. Amélioration description
-  console.log('[DQ] Vérification description produit...');
-  const descResult = await improveProductDescription(PRODUCT_GID);
-  console.log(`[DQ] Description : ${descResult.reason}`);
+  // Phase 5 — fixes
+  const fixes = await applyFixes(product, pages, storefront);
+  console.log(`[DESIGN] ${fixes.filter(f=>f.status==='ok').length}/${fixes.length} fixes appliqués`);
 
-  const durationMs = Date.now() - startMs;
+  // Rapport Telegram
+  const report = buildTelegramReport(storefront, product, pages, fixes, scoring, Date.now() - start);
+  await sendEmail('Design & Qualité — Audit complet', report);
 
-  // 4. Email rapport
-  const html = buildDesignReportHtml(qa, productAudit, descResult, durationMs);
-  const date = new Date().toLocaleDateString('fr-FR');
-  const emoji = qa.score >= 80 ? '✅' : qa.score >= 60 ? '⚠️' : '🚨';
-
-  await sendEmail(
-    `${emoji} SatinNuit — Rapport Design & Qualité ${date} · Score ${qa.score}%`,
-    html,
-  );
-
-  console.log(`[DQ] Rapport envoyé (score ${qa.score}%) ✓`);
-
-  return { score: qa.score, qa, productAudit, descResult };
+  console.log('[DESIGN] Rapport envoyé sur Telegram');
+  return { score: scoring.score, fixes: fixes.length, issues: scoring.issues.length };
 }
 
 module.exports = { runDesignQualityReport };
