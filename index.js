@@ -8,6 +8,7 @@
  *   · Trafic Viral — scripts TikTok/Reels quotidiens
  *   · Finance      — CA, marges, projections quotidiens
  *   · Client       — emails, J+7, paniers (continu)
+ *   · CRO & Concurrence — analyse + déploiement quotidien 3h00
  *   · Superviseur  — santé système + alertes (continu)
  *
  *  Variables Railway requises :
@@ -29,6 +30,7 @@ const { runWeeklySEOReport }                                                    
 const { runDailyTrafficReport }                                                  = require('./agents/traffic');
 const { runDailyFinanceReport }                                                  = require('./agents/finance');
 const { runEmailCheck, runFollowUpEmails, runCartRecovery, sendClientActivityReport } = require('./agents/customer');
+const { runCROCompetitiveReport }                                                = require('./agents/cro-competitive');
 const supervisor                                                                 = require('./agents/supervisor');
 
 // ─── Utils ────────────────────────────────────────────────────────────────────
@@ -282,6 +284,7 @@ app.get('/diag', async (req, res) => {
 
 // ── Déclenchements manuels ───────────────────────────────────────────────────
 const MANUAL_TRIGGERS = [
+  { path: '/run/cro',            agent: 'cro_competitive',   fn: () => runCROCompetitiveReport(), label: 'CRO & Concurrence' },
   { path: '/run/conversion',    agent: 'conversion_daily',  fn: () => runDailyReport(),          label: 'Conversion'      },
   { path: '/run/design-quality',agent: 'design_quality',    fn: () => runDesignQualityReport(),   label: 'Design & Qualité' },
   { path: '/run/seo',           agent: 'seo_weekly',        fn: () => runWeeklySEOReport(),        label: 'SEO'             },
@@ -410,6 +413,12 @@ cron.schedule('30 8 * * 1', async () => {
   } catch (err) { supervisor.log.error('CRON', 'Client rapport', { error: err.message }); }
 }, TZ);
 
+// ── CRO & Concurrence — quotidien 3h00 ───────────────────────────────────────
+cron.schedule('0 3 * * *', async () => {
+  try { await supervisor.track('cro_competitive', runCROCompetitiveReport); }
+  catch (err) { supervisor.log.error('CRON', 'CRO Competitive', { error: err.message }); }
+}, TZ);
+
 // ── Conversion check horaire ──────────────────────────────────────────────────
 cron.schedule('0 * * * *', async () => {
   try { await supervisor.track('conversion_hourly', runHourlyCheck); }
@@ -432,6 +441,7 @@ app.listen(PORT, () => {
     '',
     '   PLANNING DES AGENTS :',
     '   ┌─────────────────────────────────────────────────┐',
+    '   │ 03h00  CRO & Concurrence — analyse + deploy      │',
     '   │ 06h00  Superviseur — rapport santé global       │',
     '   │ 06h30  Trafic & Viral — scripts TikTok/Reels   │',
     '   │ 07h00  SEO — article + méta (lundi seulement)  │',
